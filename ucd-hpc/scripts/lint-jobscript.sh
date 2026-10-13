@@ -4,7 +4,7 @@
 # Usage: lint-jobscript.sh SCRIPT [--no-test]
 # Exit: 0 clean, 1 errors found, 2 usage.
 set -u
-F=${1:?usage: lint-jobscript.sh SCRIPT [--no-test]}
+F=${1:-}; [ -n "$F" ] || { echo "usage: lint-jobscript.sh SCRIPT [--no-test]"; exit 2; }
 NOTEST=0; [ "${2:-}" = "--no-test" ] && NOTEST=1
 [ -r "$F" ] || { echo "cannot read $F"; exit 2; }
 ERR=0; WARN=0
@@ -44,8 +44,8 @@ awk 'BEGIN{cmd=0} /^[[:space:]]*#SBATCH/{ if(cmd) {print "late"; exit} ; next} /
 # --- required requests ---------------------------------------------------------------
 has '^(--account|-A)' || err "no --account: many users have no default account (Invalid account or account/partition combination). Choose from: sacctmgr show assoc user=\$USER format=account%20,partition%20,qos%40"
 has '^(--partition|-p)' || err "no --partition: defaults differ per cluster (Franklin defaults to preemptible low). Set it explicitly"
-has '^(--time|-t)' || err "no --time: set a wall-clock limit (D-HH:MM:SS) under the partition maximum"
-if ! has '^--mem(-per-cpu|-per-gpu)?'; then
+has '^(--time([=[:space:]]|$)|-t)' || err "no --time: set a wall-clock limit (D-HH:MM:SS) under the partition maximum"
+if ! has '^--mem(-per-cpu|-per-gpu)?([=[:space:]]|$)'; then
   warn "no memory request: the partition's DefMemPerCPU applies (2 GB Farm/Franklin, 4 GB Hive high/low, more on GPU partitions). Add --mem=SIZE or --mem-per-cpu=SIZE"
 fi
 m=$(val '--mem(-per-cpu|-per-gpu)?'); [ -n "$m" ] && [[ $m =~ ^[0-9]+$ ]] && warn "--mem=$m has no unit: Slurm reads megabytes. Use e.g. ${m}G if you meant gigabytes"
@@ -109,9 +109,9 @@ grep -qE '(conda|mamba)[[:space:]]+activate' <<<"$BODY" && ! grep -qE 'module[[:
 grep -qE '^[[:space:]]*conda[[:space:]]+init|^[[:space:]]*source[[:space:]]+activate' <<<"$BODY" && warn "'conda init' / 'source activate' are not needed and can break the central conda; use module load conda; conda activate ENV"
 grep -qE '(^|[[:space:]])(--threads|-t|-p|-@|--cpus|-j|--workers|-n)[[:space:]=]+[0-9]{2,}' <<<"$BODY" && ! grep -q 'SLURM_CPUS_PER_TASK' <<<"$BODY" && info "thread counts look hard-coded; consider \$SLURM_CPUS_PER_TASK so they track --cpus-per-task"
 grep -qE 'apptainer[[:space:]]+(build|pull)' <<<"$BODY" && info "apptainer build/pull inside every job is slow; build the .sif once and reuse it"
-grep -qE 'apptainer[[:space:]]+(exec|run|shell)' <<<"$BODY" && has '^--gpus|^--gres=gpu' && ! grep -qE 'apptainer[[:space:]]+(exec|run|shell)[^\n]*--nv' <<<"$BODY" && warn "GPU job runs apptainer without --nv; the container will not see the GPU"
+grep -qE 'apptainer[[:space:]]+(exec|run|shell)' <<<"$BODY" && has '^--gpus|^--gres=gpu' && ! grep -qE 'apptainer[[:space:]]+(exec|run|shell).*--nv' <<<"$BODY" && warn "GPU job runs apptainer without --nv; the container will not see the GPU"
 grep -qE 'cd[[:space:]]+\$?TMPDIR|cd[[:space:]]+/tmp|cd[[:space:]]+/scratch' <<<"$BODY" && ! grep -qE '(cp|rsync|mv)[[:space:]].*(/quobyte|/group|\$HOME|~|/nfs)' <<<"$BODY" && warn "works in per-job scratch but never copies results out; /tmp and /scratch are deleted when the job ends"
-grep -qE 'rsync[^\n]*--delete' <<<"$BODY" && warn "rsync --delete permanently removes extra files on the destination; double-check paths"
+grep -qE 'rsync.*--delete' <<<"$BODY" && warn "rsync --delete permanently removes extra files on the destination; double-check paths"
 grep -qE '(^|[[:space:]])ssh[[:space:]]+[a-z]+-[0-9]' <<<"$BODY" && warn "ssh to compute nodes is not allowed; use srun --jobid=... --overlap --pty bash"
 grep -qE '^#SBATCH.*--mail' "$F" && info "--mail-* is set; mail from compute nodes is best-effort"
 
@@ -125,7 +125,9 @@ if [ $NOTEST = 0 ]; then
     # estimate (identical for 1 and 48 CPUs, often hours ahead of an idle partition), and
     # readers who mistake it for a wait time talk themselves into using the login node.
     sed -E 's/ to start at [^ ]+ [a-z]? ?using/ accepted, using/' <<<"$out" | sed 's/^/   /'
-    if [ $rc -ne 0 ] || grep -qiE 'error|failure|invalid' <<<"$out"; then
+    if [ $rc -eq 124 ]; then
+      ERR=$((ERR+1)); echo "   -> sbatch --test-only timed out after 30 s; the scheduler did not answer"
+    elif [ $rc -ne 0 ] || grep -qiE 'error|failure|invalid' <<<"$out"; then
       ERR=$((ERR+1)); echo "   -> the scheduler rejects this request; see references/debugging.md for the message"
     else
       echo "   -> accepted; nothing was submitted."
