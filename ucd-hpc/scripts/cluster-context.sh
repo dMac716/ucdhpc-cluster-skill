@@ -60,8 +60,10 @@ if [ -n "$QOS" ]; then
 fi
 
 hr "maintenance reservations (jobs whose --time reaches into one wait as ReqNodeNotAvail)"
-T scontrol show reservation | awk '/ReservationName/{n=$1} /StartTime/{print n, $1, $2} ' | sed 's/ReservationName=//' | head -5
-[ -z "$(T scontrol show reservation)" ] && echo "none"
+R=$(T scontrol show reservation); rc=$?
+if [ "$rc" -ne 0 ]; then echo "query failed (exit $rc)"
+elif grep -q ReservationName <<<"$R"; then awk '/ReservationName/{print $1, $2, $3}' <<<"$R" | sed 's/ReservationName=//' | head -5
+else echo "none"; fi
 
 # --- partitions ----------------------------------------------------------------
 hr "partitions: max time, default mem per CPU, preemption, nodes alloc/idle/other/total, GPUs"
@@ -104,8 +106,9 @@ fi
 
 # --- the queue ------------------------------------------------------------------
 hr "my jobs"
-Q=$(T squeue --me -o "%.10i %.16P %.20j %.3t %.11M %.11l %.5C %.9m %R")
-[ -n "$(sed -n 2p <<<"$Q")" ] && echo "$Q" || echo "none queued or running"
+Q=$(T squeue --me -o "%.18i %.16P %.20j %.3t %.11M %.11l %.5C %.9m %R"); rc=$?
+if [ "$rc" -ne 0 ]; then echo "query failed (exit $rc)"
+elif [ -n "$(sed -n 2p <<<"$Q")" ]; then echo "$Q"; else echo "none queued or running"; fi
 
 # --- storage ----------------------------------------------------------------------
 hr "storage"
