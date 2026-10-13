@@ -24,6 +24,7 @@ command -v sacct >/dev/null 2>&1 || { echo "sacct not found: run this on a clust
 
 # ---- live controller view (only while the job is still in memory) --------------
 LIVE=$(T scontrol show job "$J")
+LIVE=$(awk -v RS= '!f{f=$0} /ArrayTaskId=[0-9]+ /&&!g{g=$0} END{print g?g:f}' <<<"$LIVE")
 if [ -n "$LIVE" ]; then
   hr "scontrol show job $J (live)"
   grep -oE '(JobState|Reason|Dependency|Priority|Partition|Account|QOS|Restarts|TimeLimit|RunTime|StartTime|SubmitTime|NumNodes|NumCPUs|CPUs/Task|TRES|NodeList|BatchHost|Command|WorkDir|StdOut|StdErr|Features|MinMemoryCPU|MinMemoryNode|ExitCode)=[^ ]*' <<<"$LIVE" | paste -sd' ' - | fold -s -w 110
@@ -59,7 +60,7 @@ elif [ -n "$REQMEM" ]; then
   echo "memory: requested $REQMEM (no RSS recorded; job may not have run)"
 fi
 # CPU efficiency: TotalCPU (D-HH:MM:SS or MM:SS.mmm) vs Elapsed*AllocCPUS
-to_sec() { local s=${1%.*} d=0; [[ $s == *-* ]] && { d=${s%%-*}; s=${s#*-}; }; IFS=: read -r a b c <<<"$s"; if [ -z "$c" ]; then c=$b; b=$a; a=0; fi; echo $(( d*86400 + ${a:-0}*3600 + ${b:-0}*60 + ${c:-0} )); }
+to_sec() { local s=${1%.*} d=0; [[ $s == *-* ]] && { d=${s%%-*}; s=${s#*-}; }; IFS=: read -r a b c <<<"$s"; if [ -z "$c" ]; then c=$b; b=$a; a=0; fi; echo $(( 10#${d}*86400 + 10#${a:-0}*3600 + 10#${b:-0}*60 + 10#${c:-0} )); }
 ES=$(to_sec "${ELAPSED:-0}"); CS=$(to_sec "${TOTALCPU:-0}")
 if [ "$ES" -gt 0 ] && [ "${ALLOCCPUS:-0}" -gt 0 ]; then
   echo "cpu efficiency: $(( CS * 100 / (ES * ALLOCCPUS) ))%  (TotalCPU $TOTALCPU over $ALLOCCPUS CPUs × $ELAPSED)"
@@ -109,12 +110,15 @@ esac
 # ---- logs ----------------------------------------------------------------------------
 [ "$SHOWLOGS" = 0 ] && exit 0
 hr "log files"
-OUT=$(grep -oE 'StdOut=[^ ]+' <<<"$LIVE" | cut -d= -f2-); ERR=$(grep -oE 'StdErr=[^ ]+' <<<"$LIVE" | cut -d= -f2-)
+IFS='|' read -r SOUT SERR RAW SUSER <<<"$(T sacct -j "$JID" -X -n -P -o StdOut,StdErr,JobIDRaw,User)"
+expand() { local p=$1; [ -n "$p" ] && [ "${p:0:1}" != / ] && p=$WORKDIR/$p; p=${p//\%A/${JID%%_*}}; p=${p//\%a/${JID#*_}}; p=${p//\%j/$RAW}; p=${p//\%x/$JNAME}; p=${p//\%u/$SUSER}; [[ $p == *%* ]] && p=; echo "$p"; }
+OUT=$(expand "$SOUT"); ERR=$(expand "$SERR")
+[ -z "$OUT" ] && { OUT=$(grep -oE 'StdOut=[^ ]+' <<<"$LIVE" | cut -d= -f2-); ERR=$(grep -oE 'StdErr=[^ ]+' <<<"$LIVE" | cut -d= -f2-); }
 CANDS=()
 [ -n "$OUT" ] && CANDS+=("$OUT"); [ -n "$ERR" ] && [ "$ERR" != "$OUT" ] && CANDS+=("$ERR")
 if [ ${#CANDS[@]} -eq 0 ] && [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
   base=${JID%%_*}
-  while IFS= read -r f; do CANDS+=("$f"); done < <(ls -t "$WORKDIR"/*"$base"* "$WORKDIR"/slurm-"$base".out 2>/dev/null | awk '!s[$0]++' | head -4)
+  while IFS= read -r f; do CANDS+=("$f"); done < <(ls -td "$WORKDIR"/*"$base"* "$WORKDIR"/slurm-"$base".out 2>/dev/null | awk -v b="$base" '!s[$0]++ { n=split($0,a,"/"); if (a[n] ~ "(^|[^0-9])" b "([^0-9]|$)") print }' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done | head -4)
 fi
 PAT='oom-kill|oom_kill|out of memory|OutOfMemory|CANCELLED AT|DUE TO TIME LIMIT|DUE TO PREEMPTION|command not found|No such file|Permission denied|Segmentation fault|Illegal instruction|Killed|Disk quota exceeded|No space left|ModuleNotFoundError|ImportError|CUDA (error|out of memory)|Traceback|[Ee]rror:|ERROR'
 if [ ${#CANDS[@]} -eq 0 ]; then
