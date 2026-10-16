@@ -23,25 +23,49 @@ fi
 command -v sacct >/dev/null 2>&1 || { echo "sacct not found: run this on a cluster login node (Slurm is at $SLURM_BIN)"; exit 2; }
 
 # ---- live controller view (only while the job is still in memory) --------------
-LIVE=$(T scontrol show job "$J")
-LIVE=$(awk -v RS= '!f{f=$0} /ArrayTaskId=[0-9]+ /&&!g{g=$0} END{print g?g:f}' <<<"$LIVE")
-if [ -n "$LIVE" ]; then
-  hr "scontrol show job $J (live)"
-  grep -oE '(JobState|Reason|Dependency|Priority|Partition|Account|QOS|Restarts|TimeLimit|RunTime|StartTime|SubmitTime|NumNodes|NumCPUs|CPUs/Task|TRES|NodeList|BatchHost|Command|WorkDir|StdOut|StdErr|Features|MinMemoryCPU|MinMemoryNode|ExitCode)=[^ ]*' <<<"$LIVE" | paste -sd' ' - | fold -s -w 110
-fi
-
-# ---- accounting -------------------------------------------------------------------
-hr "sacct"
-FMT=JobID,JobName%28,State,ExitCode,Reason,Partition,Account,QOS%22,Submit,Start,End,Elapsed,Timelimit,ReqCPUS,AllocCPUS,ReqMem,MaxRSS,TotalCPU,NodeList,WorkDir
+# A bare array or het-job id returns several records; the one that matches sacct's main row is picked below.
+LIVE_ALL=$(T scontrol show job "$J")
+FMT=JobID,JobName%28,State,ExitCode,Reason,Partition,Account,QOS%22,Submit,Start,End,Elapsed,Timelimit,ReqCPUS,AllocCPUS,ReqMem,MaxRSS,TotalCPU,NodeList,WorkDir,StdOut,StdErr,JobIDRaw,User
 ACC=$(T sacct -j "$J" -P --format="$FMT")
-[ -z "$(sed -n 2p <<<"$ACC")" ] && { echo "sacct knows nothing about job $J (wrong id, wrong cluster, or too old)."; exit 1; }
-echo "$ACC" | cut -d'|' -f1-8,12,13,16,17,19 | column -t -s'|'
 
 # main record = the line whose JobID is exactly J (or J_arraytask)
 MAIN=$(awk -F'|' -v j="$J" 'NR>1 && ($1==j || $1 ~ "^"j"_[0-9]+$" || $1 ~ "^"j"\\+") {print; exit}' <<<"$ACC")
 [ -z "$MAIN" ] && MAIN=$(sed -n 2p <<<"$ACC")
-IFS='|' read -r JID JNAME STATE EXIT REASON PART ACCT QOS SUBMIT START END ELAPSED TLIM REQCPUS ALLOCCPUS REQMEM MAXRSS TOTALCPU NODES WORKDIR <<<"$MAIN"
+IFS='|' read -r JID JNAME STATE EXIT REASON PART ACCT QOS SUBMIT START END ELAPSED TLIM REQCPUS ALLOCCPUS REQMEM MAXRSS TOTALCPU NODES WORKDIR SOUT SERR RAW SUSER <<<"$MAIN"
 STATE0=${STATE%% *}
+
+# live record for JID: array task = ArrayJobId+ArrayTaskId, het component = HetJobId+HetJobOffset, else JobId
+want_a="JobId=${JID:-$J}"; want_b=""
+case "$JID" in
+  *_*) want_a="ArrayJobId=${JID%%_*}"; t=${JID#*_}; t=${t#[}; want_b="ArrayTaskId=${t%]}";;
+  *+*) want_a="HetJobId=${JID%%+*}"; want_b="HetJobOffset=${JID#*+}";;
+esac
+# recs 1 = the scontrol record for JID, empty if none matches (e.g. the task already left the controller; a
+#          placeholder's StdOut would then name the wrong log);
+# recs 2 = the other records worth showing, one per line: array placeholders (pending ranges), other het components
+recs() { awk -v RS= -v a="$want_a" -v b="$want_b" -v mode="$1" '
+  { n=split($0,t,/[[:space:]]+/); fa=0; fb=(b==""); oth[NR]=0
+    for(i=1;i<=n;i++){ if(t[i]==a)fa=1; if(t[i]==b)fb=1
+      if((t[i] ~ /^ArrayTaskId=/ && t[i] !~ /^ArrayTaskId=[0-9]+$/) || t[i] ~ /^HetJobId=/)oth[NR]=1 }
+    r[NR]=$0; hit[NR]=(fa&&fb) }
+  END{ sel=0; for(i=1;i<=NR;i++) if(hit[i]){sel=i;break}
+       if(mode==1){ if(sel) print r[sel] } else for(i=1;i<=NR;i++) if(i!=sel && oth[i]){ gsub(/[[:space:]]+/," ",r[i]); print r[i] } }' <<<"$LIVE_ALL"; }
+fields() { grep -oE '(JobState|Reason|Dependency|Priority|Partition|Account|QOS|Restarts|TimeLimit|RunTime|StartTime|SubmitTime|NumNodes|NumCPUs|CPUs/Task|TRES|NodeList|BatchHost|Command|WorkDir|StdOut|StdErr|Features|MinMemoryCPU|MinMemoryNode|ExitCode)=[^ ]*' | paste -sd' ' - | fold -s -w 110; }
+LIVE=$(recs 1); LIVE_OTHER=$(recs 2)
+if [ -z "$LIVE" ] && [ -z "$LIVE_OTHER" ] && [ -n "$LIVE_ALL" ] && [ -z "$JID" ]; then LIVE=$LIVE_ALL; fi
+if [ -n "$LIVE" ] || [ -n "$LIVE_OTHER" ]; then
+  hr "scontrol show job ${JID:-$J} (live)"
+  if [ -n "$LIVE" ]; then fields <<<"$LIVE"; else echo "(${JID:-$J} itself is no longer in the controller)"; fi
+  [ -n "$LIVE_OTHER" ] && while IFS= read -r r; do
+    echo "-- also $(grep -oE '(^| )(JobId|ArrayTaskId|HetJobOffset)=[^ ]+' <<<"$r" | sed 's/^ //' | paste -sd' ' -):"
+    fields <<<"$r"
+  done <<<"$LIVE_OTHER"
+fi
+
+# ---- accounting -------------------------------------------------------------------
+hr "sacct"
+[ -z "$(sed -n 2p <<<"$ACC")" ] && { echo "sacct knows nothing about job $J (wrong id, wrong cluster, or too old)."; exit 1; }
+echo "$ACC" | cut -d'|' -f1-8,12,13,16,17,19 | column -t -s'|'
 
 # peak RSS over all steps, in MB
 to_mb() { local v=${1%[KMGT]}; case "$1" in *K) awk "BEGIN{printf \"%.0f\", $v/1024}";; *M) printf '%s' "${v%.*}";; *G) awk "BEGIN{printf \"%.0f\", $v*1024}";; *T) awk "BEGIN{printf \"%.0f\", $v*1024*1024}";; '') echo 0;; *) awk "BEGIN{printf \"%.0f\", $1/1024/1024}";; esac; }
@@ -110,10 +134,17 @@ esac
 # ---- logs ----------------------------------------------------------------------------
 [ "$SHOWLOGS" = 0 ] && exit 0
 hr "log files"
-IFS='|' read -r SOUT SERR RAW SUSER <<<"$(T sacct -j "$JID" -X -n -P -o StdOut,StdErr,JobIDRaw,User)"
-expand() { local p=$1; [ -n "$p" ] && [ "${p:0:1}" != / ] && p=$WORKDIR/$p; p=${p//\%A/${JID%%_*}}; p=${p//\%a/${JID#*_}}; p=${p//\%j/$RAW}; p=${p//\%x/$JNAME}; p=${p//\%u/$SUSER}; [[ $p == *%* ]] && p=; echo "$p"; }
-OUT=$(expand "$SOUT"); ERR=$(expand "$SERR")
-[ -z "$OUT" ] && { OUT=$(grep -oE 'StdOut=[^ ]+' <<<"$LIVE" | cut -d= -f2-); ERR=$(grep -oE 'StdErr=[^ ]+' <<<"$LIVE" | cut -d= -f2-); }
+# scontrol has the fully expanded paths while the job is live; afterwards expand sacct's stored pattern.
+# Each stream falls back on its own (a job may set only --error). Patterns we cannot expand are dropped.
+expand() {
+  local p=$1 task=4294967294   # Slurm's %a for a job that is not an array
+  [[ $JID == *_* ]] && task=${JID#*_}
+  [ -n "$p" ] && [ "${p:0:1}" != / ] && p=$WORKDIR/$p
+  p=${p//\%A/"${JID%%_*}"}; p=${p//\%a/"$task"}; p=${p//\%j/"$RAW"}; p=${p//\%x/"$JNAME"}; p=${p//\%u/"$SUSER"}
+  [[ $p == *%* ]] && p=; echo "$p"
+}
+OUT=$(grep -oE 'StdOut=[^ ]+' <<<"$LIVE" | cut -d= -f2-); ERR=$(grep -oE 'StdErr=[^ ]+' <<<"$LIVE" | cut -d= -f2-)
+[ -z "$OUT" ] && OUT=$(expand "$SOUT"); [ -z "$ERR" ] && ERR=$(expand "$SERR")
 CANDS=()
 [ -n "$OUT" ] && CANDS+=("$OUT"); [ -n "$ERR" ] && [ "$ERR" != "$OUT" ] && CANDS+=("$ERR")
 if [ ${#CANDS[@]} -eq 0 ] && [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
