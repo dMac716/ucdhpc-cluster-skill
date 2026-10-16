@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/lint-jobscript.sh: usage exit code, --time/--mem option-prefix
-# matching, apptainer --nv and rsync --delete detection, and sbatch --test-only timeout (rc 124).
+# matching and value parsing, apptainer --nv and rsync --delete detection, and sbatch --test-only
+# timeout (rc 124, a warning).
 # Cluster-free: stub sbatch/timeout go in a mktemp dir at the front of PATH. Run: bash tests/test-lint-jobscript.sh
 # Override the tree under test with SCRIPTS_DIR=/path/to/scripts. TAP-like output; exit 1 if any test fails.
 # Note: a pass-through 'timeout' stub (drops the duration, runs the command) is added only when the host has no
@@ -36,7 +37,8 @@ job() {
   JOBFILE=$f
 }
 BASE1='#SBATCH --account=testacct'; BASE2='#SBATCH --partition=low'
-run_lint() { OUT=$(PATH="$STUBS:$PATH" bash "$LINT" "$@" 2>&1); RC=$?; }
+# UCD_HPC_HPCCF_ROOT points at nothing so a run on a real cluster node does not pick up its cluster name
+run_lint() { OUT=$(UCD_HPC_HPCCF_ROOT="$TMP/no-hpccf" PATH="$STUBS:$PATH" bash "$LINT" "$@" 2>&1); RC=$?; }
 
 has_text()  { case "$OUT" in *"$1"*) return 0;; *) return 1;; esac; }
 want()      { has_text "$1" || MSG="$MSG
@@ -100,7 +102,29 @@ t_sbatch_timeout_reported_as_timeout_not_rejection() {
   printf '#!/bin/sh\nexit 124\n' >"$STUBS/timeout"; chmod +x "$STUBS/timeout" # simulates 30 s expiry
   job f "$BASE1" "$BASE2" '#SBATCH --time=10' '#SBATCH --mem=1G' 'echo hi'
   run_lint "$JOBFILE"
-  want "timed out"; refuse "the scheduler rejects this request"; want_rc 1
+  want "timed out"; refuse "the scheduler rejects this request"; refuse "ERROR:"; want_rc 0
+}
+# (h) values written with a tab or a space are read, not only detected ---------------------
+t_tab_or_space_separated_values_are_read() {
+  local v
+  for v in '--mem\t200' '--mem 200' '--mem=200'; do
+    job h "$BASE1" "$BASE2" '#SBATCH --time=10' "#SBATCH $v" 'echo hi'
+    run_lint "$JOBFILE" --no-test
+    want "--mem=200 has no unit"
+    [ -z "$MSG" ] || { MSG="$MSG
+    (variant: $v)"; return; }
+  done
+}
+t_short_option_values_are_read() {
+  job h2 '#SBATCH -A testacct' '#SBATCH -p low' '#SBATCH -t 10' '#SBATCH -c8' '#SBATCH --mem=1G' \
+    '#SBATCH -o out.log' 'echo hi'
+  run_lint "$JOBFILE" --no-test
+  refuse "no --account"; refuse "no --partition"; refuse "no --time"; want "--output=out.log has no %j"
+}
+t_exclusive_with_trailing_space_is_seen() {
+  job h3 "$BASE1" "$BASE2" '#SBATCH --time=10' '#SBATCH --mem=1G' '#SBATCH --exclusive   ' 'echo hi'
+  run_lint "$JOBFILE" --no-test
+  want "--exclusive reserves whole nodes"
 }
 # (g) control -------------------------------------------------------------------------
 t_clean_script_with_accepting_sbatch_has_no_errors() {
@@ -129,6 +153,9 @@ for t in t_no_args_exits_2_with_usage \
          t_rsync_delete_after_info_flag_is_warned \
          t_rsync_without_delete_is_not_warned \
          t_sbatch_timeout_reported_as_timeout_not_rejection \
+         t_tab_or_space_separated_values_are_read \
+         t_short_option_values_are_read \
+         t_exclusive_with_trailing_space_is_seen \
          t_clean_script_with_accepting_sbatch_has_no_errors; do
   run_test "$t"
 done
