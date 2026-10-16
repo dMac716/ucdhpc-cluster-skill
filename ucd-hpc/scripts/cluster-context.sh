@@ -9,9 +9,10 @@ T() { timeout 25 "$@" 2>/dev/null; }
 hr() { printf '\n== %s ==\n' "$1"; }
 
 # --- which cluster -----------------------------------------------------------
+HPCCF_ROOT=${UCD_HPC_HPCCF_ROOT:-/opt/hpccf}   # overridable so the tests do not pick up the real cluster
 CLUSTER=""
-if [ -r /opt/hpccf/etc/cluster_name.conf ]; then
-  CLUSTER=$(. /opt/hpccf/etc/cluster_name.conf 2>/dev/null; echo "${CLUSTER_NAME:-}")
+if [ -r "$HPCCF_ROOT/etc/cluster_name.conf" ]; then
+  CLUSTER=$(. "$HPCCF_ROOT/etc/cluster_name.conf" 2>/dev/null; echo "${CLUSTER_NAME:-}")
 fi
 # Slurm lives at a fixed path on all three clusters; never search for it.
 SLURM_BIN=/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin
@@ -45,8 +46,8 @@ echo "reference: references/${CLUSTER}.md"
 
 # --- the user's access --------------------------------------------------------
 hr "accounts / partitions / QOS for $USER (⁺ = default account)"
-if [ -x /opt/hpccf/bin/slurm-show-resources.py ]; then
-  T /opt/hpccf/bin/slurm-show-resources.py | sed '/^$/d'
+if [ -x "$HPCCF_ROOT/bin/slurm-show-resources.py" ]; then
+  T "$HPCCF_ROOT/bin/slurm-show-resources.py" | sed '/^$/d'
 else
   T sacctmgr show assoc user="$USER" format=account%20,partition%20,qos%40
 fi
@@ -106,7 +107,7 @@ fi
 
 # --- the queue ------------------------------------------------------------------
 hr "my jobs"
-Q=$(T squeue --me -o "%.18i %.16P %.20j %.3t %.11M %.11l %.5C %.9m %R"); rc=$?
+Q=$(T squeue --me -o "%.30i %.16P %.20j %.3t %.11M %.11l %.5C %.9m %R"); rc=$?
 if [ "$rc" -ne 0 ]; then echo "query failed (exit $rc)"
 elif [ -n "$(sed -n 2p <<<"$Q")" ]; then echo "$Q"; else echo "none queued or running"; fi
 

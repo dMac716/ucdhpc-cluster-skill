@@ -81,14 +81,14 @@ esac
 printf "%${w}.${w}s %s\n" JOBID "PARTITION NAME ST TIME TIME_LIMIT CPUS MIN_MEM NODELIST(REASON)"
 case "${STUB_SQUEUE:-header}" in
   jobs)  printf "%${w}.${w}s %s\n" 123456 "low myjob R 0:10 1:00:00 4 8G node1" ;;
-  array) printf "%${w}.${w}s %s\n" "39695357_[1-23%3]" "low myjob PD 0:00 1:00:00 4 8G (Priority)" ;;
+  array) printf "%${w}.${w}s %s\n" "24034091_[198-500%20]" "low myjob PD 0:00 1:00:00 4 8G (Priority)" ;;
 esac
 exit 0
 S
 
 # run_ctx VAR=val...  -> runs the real script (--brief) with stubs first on PATH; stdout in $TMP/out
 run_ctx() {
-  env USER=tester "$@" PATH="$STUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" --brief >"$TMP/out" 2>"$TMP/err"
+  env USER=tester UCD_HPC_HPCCF_ROOT="$TMP/no-hpccf" "$@" PATH="$STUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" --brief >"$TMP/out" 2>"$TMP/err"
 }
 # section "header prefix" -> body lines of that "== ... ==" section, blank lines removed
 section() { awk -v h="== $1" 'index($0,h)==1{on=1;next} /^== /{on=0} on' "$TMP/out" | sed '/^$/d'; }
@@ -133,7 +133,7 @@ test_squeue_header_only_prints_none_queued() {
 test_array_job_id_not_truncated() {
   run_ctx STUB_SQUEUE=array || { fail "script exited non-zero"; return 1; }
   s=$(section "$JOBS")
-  printf '%s\n' "$s" | grep -qF '39695357_[1-23%3]' || { show "$s"; fail "array id cut off in 'my jobs' table"; return 1; }
+  printf '%s\n' "$s" | grep -qF '24034091_[198-500%20]' || { show "$s"; fail "array id cut off in 'my jobs' table"; return 1; }
 }
 test_control_healthy_output_unchanged() {
   run_ctx STUB_RESV=silent STUB_SQUEUE=jobs || { fail "script exited non-zero"; return 1; }

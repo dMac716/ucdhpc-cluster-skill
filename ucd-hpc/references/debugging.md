@@ -7,7 +7,7 @@ does not.
 
 ```bash
 squeue --me                                                    # queued or running? reason if pending
-squeue --me -o "%.10i %.12P %.20j %.3t %.12M %.12l %.5C %.10m %R" # + time used/limit, CPUs, mem
+squeue --me -o "%.30i %.12P %.20j %.3t %.12M %.12l %.5C %.10m %R" # + time used/limit, CPUs, mem
 sacct -j ID -X --format=JobID,State,ExitCode,Elapsed,Timelimit,ReqMem,MaxRSS,NodeList,Reason
 sacct -u $USER -S 2026-09-01 -X --format=JobID,JobName%20,Partition,State,ExitCode,Elapsed
 scontrol show job ID          # everything, only while Slurm still remembers the job
